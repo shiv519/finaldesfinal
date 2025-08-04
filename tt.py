@@ -1,70 +1,80 @@
+# ==============================
+# SCHOOL TIMETABLE GENERATOR - FULL VERSION
+# ==============================
+
 import streamlit as st
-import sqlite3
 import pandas as pd
+import sqlite3
 import random
 import os
-import io
 import google.generativeai as genai
 
-# ---------------------- CONFIG ----------------------
-DB_PATH = "timetable.db"
-genai.configure(api_key=st.secrets.get("GEMINI_API_KEY", ""))
+# ==============================
+# CONFIG
+# ==============================
+
+DB_FILE = "timetable.db"
+
+# Configure Gemini AI (Google Generative AI)
+if "GEMINI_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+else:
+    st.warning("No GEMINI_API_KEY found in secrets. AI features will be disabled.")
+    genai = None
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
-# -------------------- DATABASE ----------------------
+# ==============================
+# DB CONNECTION & INIT
+# ==============================
 
 def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
-    # Teachers
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS teachers (
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS teachers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        teacher_name TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        grades TEXT NOT NULL
+        teacher_name TEXT,
+        subject TEXT,
+        grades TEXT
     )""")
-    # Subjects
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS subjects (
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS subjects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject_name TEXT NOT NULL,
-        grade TEXT NOT NULL,
-        periods_per_week INTEGER NOT NULL,
-        sections TEXT NOT NULL DEFAULT 'A', -- comma-separated sections
-        active_days TEXT NOT NULL DEFAULT 'Monday,Tuesday,Wednesday,Thursday,Friday' -- comma-separated days
+        subject_name TEXT,
+        grade TEXT,
+        periods_per_week INTEGER,
+        sections TEXT DEFAULT 'A'
     )""")
-    # Subject colors
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS subject_colors (
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS subject_colors (
         subject_name TEXT PRIMARY KEY,
         color_code TEXT
     )""")
-    # Busy periods (timetable slots)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS teacher_busy_periods (
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS teacher_busy_periods (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        teacher_id INTEGER NOT NULL,
-        grade TEXT NOT NULL,
-        section TEXT NOT NULL,
-        period_number INTEGER NOT NULL,
-        day_of_week TEXT NOT NULL,
-        FOREIGN KEY(teacher_id) REFERENCES teachers(id)
+        teacher_id INTEGER,
+        grade TEXT,
+        section TEXT,
+        period_number INTEGER,
+        day_of_week TEXT
     )""")
-    # Settings (key-value)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )""")
+
     conn.commit()
     conn.close()
 
-# ----------------- UTILITIES ------------------------
+# ==============================
+# COLOR UTILS
+# ==============================
 
 def get_random_pastel():
     r = lambda: random.randint(150, 255)
@@ -85,7 +95,8 @@ def ensure_subject_color(subject_name):
         conn.close()
         return row[0]
     color = get_random_pastel()
-    cur.execute("INSERT OR IGNORE INTO subject_colors(subject_name, color_code) VALUES (?, ?)", (subject_name, color))
+    cur.execute("INSERT INTO subject_colors (subject_name, color_code) VALUES (?, ?)",
+                (subject_name, color))
     conn.commit()
     conn.close()
     return color
@@ -98,41 +109,56 @@ def get_subject_colors():
     conn.close()
     return colors
 
-# ------------------ DATA ACCESS ----------------------
+# ==============================
+# AI GENERATION
+# ==============================
 
-def get_teachers():
+def generate_timetable_ai(prompt):
+    if genai is None:
+        st.error("AI is disabled because GEMINI_API_KEY is missing.")
+        return None
+    model = genai.GenerativeModel("gemini-pro")
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"AI Error: {e}")
+        return None
+
+# ==============================
+# DB HELPER FUNCTIONS
+# ==============================
+
+def add_teacher(teacher_name, subject, grades):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, teacher_name, subject, grades FROM teachers")
-    data = cur.fetchall()
+    cur.execute("INSERT INTO teachers (teacher_name, subject, grades) VALUES (?, ?, ?)",
+                (teacher_name, subject, grades))
+    conn.commit()
     conn.close()
-    return data
 
-def get_teachers_for_grade_section(grade, section):
-    # Return teachers who teach the grade & section (section is in grades CSV)
+def add_subject(subject_name, grade, periods_per_week, sections):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, teacher_name, subject, grades FROM teachers")
-    teachers = []
-    for tid, tname, sub, grades_csv in cur.fetchall():
-        grades = [g.strip() for g in grades_csv.split(",")]
-        if grade in grades:
-            teachers.append((tid, tname, sub))
+    cur.execute("""INSERT INTO subjects (subject_name, grade, periods_per_week, sections)
+                   VALUES (?, ?, ?, ?)""",
+                (subject_name, grade, periods_per_week, sections))
+    conn.commit()
+    conn.close()
+    ensure_subject_color(subject_name)
+
+def get_all_teachers():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT teacher_name, subject, grades FROM teachers")
+    teachers = cur.fetchall()
     conn.close()
     return teachers
 
-def get_subjects():
+def get_all_subjects():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, subject_name, grade, periods_per_week, sections, active_days FROM subjects")
-    data = cur.fetchall()
-    conn.close()
-    return data
-
-def get_subjects_for_grade(grade):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT subject_name, periods_per_week, sections, active_days FROM subjects WHERE grade=?", (grade,))
+    cur.execute("SELECT subject_name, grade, periods_per_week, sections FROM subjects")
     subs = cur.fetchall()
     conn.close()
     return subs
@@ -143,567 +169,270 @@ def clear_timetable():
     cur.execute("DELETE FROM teacher_busy_periods")
     conn.commit()
     conn.close()
+# ==============================
+# TIMETABLE GENERATION LOGIC
+# ==============================
 
-def clear_timetable_for_grade_section(grade, section):
+def is_teacher_busy(teacher_id, day, period):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("DELETE FROM teacher_busy_periods WHERE grade=? AND section=?", (grade, section))
+    cur.execute("""SELECT COUNT(*) FROM teacher_busy_periods
+                   WHERE teacher_id=? AND day_of_week=? AND period_number=?""",
+                (teacher_id, day, period))
+    busy = cur.fetchone()[0] > 0
+    conn.close()
+    return busy
+
+def assign_period(teacher_id, grade, section, day, period):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO teacher_busy_periods
+                   (teacher_id, grade, section, day_of_week, period_number)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (teacher_id, grade, section, day, period))
     conn.commit()
     conn.close()
 
-def get_busy_periods():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT tbp.id, t.teacher_name, t.subject, tbp.grade, tbp.section, tbp.period_number, tbp.day_of_week
-        FROM teacher_busy_periods tbp
-        JOIN teachers t ON tbp.teacher_id = t.id
-        ORDER BY tbp.day_of_week, tbp.period_number, tbp.grade, tbp.section
-    """)
-    data = cur.fetchall()
-    conn.close()
-    return data
-
-# ---------------- TIMETABLE GENERATION -----------------
-
-def generate_timetable(ai_mode: bool, absent_teachers, max_periods_per_subject_per_day=2):
-    """
-    Generates timetable for all grades & sections.
-    Enforces:
-    - No teacher overlaps
-    - Max periods per subject per day per section (except sections with fewer active days)
-    - Substitutions for absent teachers (fallback to 'Games' if no sub)
-    - Each grade & teacher gets >=1 Games period/week
-    """
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # Load all subjects grouped by grade & section
-    cur.execute("SELECT DISTINCT grade FROM subjects")
-    grades = [r[0] for r in cur.fetchall()]
-
-    # Clear all timetable entries before generation
+def generate_timetable(periods_per_day=7):
     clear_timetable()
+    teachers = get_all_teachers()
+    subjects = get_all_subjects()
 
-    # Build teacher availability
-    teachers = get_teachers()
-    teacher_dict = {tid: {"name": tname, "subject": sub, "grades": grades_str.split(",")} for tid, tname, sub, grades_str in teachers}
+    conn = get_conn()
+    cur = conn.cursor()
+    colors = get_subject_colors()
 
-    # For easy teacher lookup by grade and subject
-    grade_subject_teachers = {}
-    for tid, tname, sub, grades_csv in teachers:
-        for g in grades_csv.split(","):
-            key = (g.strip(), sub)
-            grade_subject_teachers.setdefault(key, []).append(tid)
+    # Create subject -> teacher mapping for quick lookup
+    teacher_map = {}
+    for tidx, (tname, subj, grades) in enumerate(teachers, start=1):
+        for g in grades.split(","):
+            g = g.strip()
+            teacher_map.setdefault((g, subj), []).append((tidx, tname))
 
-    # Get all subjects
-    subjects = get_subjects()
+    # Generate timetable
+    for subj_name, grade, ppw, sections in subjects:
+        sections_list = [s.strip() for s in sections.split(",")]
+        for section in sections_list:
+            assigned_periods = 0
+            days_shuffled = WEEKDAYS.copy()
+            random.shuffle(days_shuffled)
 
-    # Data structure for timetable: {grade: {section: {day: {period: (teacher_id, subject)}}}}
-    timetable = {}
-    # Track teacher load per day and global assignments
-    teacher_load = {}
-    teacher_games_assigned = set()
-    grade_games_assigned = {}
+            for day in days_shuffled:
+                if assigned_periods >= ppw:
+                    break
+                periods_today = 0
+                for period in range(1, periods_per_day + 1):
+                    if assigned_periods >= ppw:
+                        break
 
-    # Helper to assign games period if needed
-    def assign_games_period(grade, section, day, period):
-        # find a 'Games' teacher who can teach this grade
-        possible_games_teachers = grade_subject_teachers.get((grade, "Games"), [])
-        if not possible_games_teachers:
-            return False
-        for t_id in possible_games_teachers:
-            # Check if teacher free this period
-            if teacher_load.get((t_id, day), 0) < 5:
-                # Assign Games period
-                timetable.setdefault(grade, {}).setdefault(section, {}).setdefault(day, {})[period] = (t_id, "Games")
-                teacher_load[(t_id, day)] = teacher_load.get((t_id, day), 0) + 1
-                teacher_games_assigned.add((t_id, day))
-                grade_games_assigned.setdefault(grade, set()).add(day)
-                return True
-        return False
+                    # Constraint: Max 2 periods per day per subject (unless section attends < 5 days)
+                    if periods_today >= 2 and len(days_shuffled) == 5:
+                        break
 
-    # Fill timetable for each grade & section
-    for grade in grades:
-        # Get subjects for grade
-        grade_subjects = [s for s in subjects if s[2] == grade]
-        # Parse all sections in grade subjects
-        sections = set()
-        for sub_name, _, secs_csv, active_days_csv in grade_subjects:
-            for sec in secs_csv.split(","):
-                sections.add(sec.strip())
-        if not sections:
-            sections = {"A"}
-        timetable.setdefault(grade, {})
-
-        for section in sections:
-            timetable[grade].setdefault(section, {})
-            # Get active days for this section (intersection of all subjects active days)
-            section_active_days = None
-            for sub_name, _, secs_csv, active_days_csv in grade_subjects:
-                if section in [s.strip() for s in secs_csv.split(",")]:
-                    days = set([d.strip() for d in active_days_csv.split(",")])
-                    if section_active_days is None:
-                        section_active_days = days
+                    # Pick a teacher
+                    if (grade, subj_name) not in teacher_map:
+                        teacher_id = None
                     else:
-                        section_active_days = section_active_days.intersection(days)
-            if section_active_days is None:
-                section_active_days = set(WEEKDAYS)
-            # Convert back to list sorted by weekday order
-            section_active_days = [d for d in WEEKDAYS if d in section_active_days]
-
-            # For each active day, initialize timetable grid (periods 1-8)
-            for day in WEEKDAYS:
-                timetable[grade][section][day] = {}
-
-            # Assign subjects
-            # Build subject periods counts per section
-            subject_periods = {}
-            for sub_name, periods_per_week, secs_csv, active_days_csv in grade_subjects:
-                if section in [s.strip() for s in secs_csv.split(",")]:
-                    # Scale periods per week based on active days ratio
-                    total_days = len([d for d in active_days_csv.split(",") if d.strip() in WEEKDAYS])
-                    active_days_count = len(section_active_days)
-                    adjusted_periods = max(1, round(periods_per_week * active_days_count / total_days))
-                    subject_periods[sub_name] = adjusted_periods
-
-            # Periods per day fixed at 8
-            periods_per_day = 8
-
-            # Track how many periods per subject assigned per day to this section
-            subject_day_count = {day: {} for day in WEEKDAYS}
-
-            # Teacher daily load tracking for overlaps
-            # key = (teacher_id, day), val = count of periods assigned
-            # Max 5 periods per day
-            teacher_daily_load = {}
-
-            # Assign subjects randomly but enforce constraints
-            # Flatten all periods to assign: total_periods = sum of all subject_periods
-            all_subject_slots = []
-            for sub, cnt in subject_periods.items():
-                all_subject_slots.extend([sub]*cnt)
-            random.shuffle(all_subject_slots)
-
-            for sub in all_subject_slots:
-                placed = False
-                attempts = 0
-                while not placed and attempts < 100:
-                    attempts += 1
-                    day = random.choice(section_active_days)
-                    period = random.randint(1, periods_per_day)
-                    if period in timetable[grade][section][day]:
-                        continue  # already assigned
-                    # Check subject daily limit if section attends all days
-                    max_per_day = max_periods_per_subject_per_day
-                    if len(section_active_days) < 5:
-                        max_per_day = 10  # relax limit for sections attending fewer days
-                    if subject_day_count[day].get(sub, 0) >= max_per_day:
-                        continue
-                    # Find available teachers for this grade and subject excluding absentees
-                    candidates = grade_subject_teachers.get((grade, sub), [])
-                    candidates = [tid for tid in candidates if
-                                  tid not in absent_teachers.get(day, [])]
-                    # Also exclude teachers who have overlap at this day/period
-                    available_teachers = []
-                    for tid in candidates:
-                        if teacher_daily_load.get((tid, day), 0) >= 5:
-                            continue
-                        # Check if teacher is already assigned this period (overlap)
-                        conflict = False
-                        for g in timetable:
-                            for sec in timetable[g]:
-                                if day in timetable[g][sec] and period in timetable[g][sec][day]:
-                                    if timetable[g][sec][day][period][0] == tid:
-                                        conflict = True
-                                        break
-                            if conflict:
+                        possible_teachers = teacher_map[(grade, subj_name)]
+                        random.shuffle(possible_teachers)
+                        teacher_id = None
+                        for tid, _ in possible_teachers:
+                            if not is_teacher_busy(tid, day, period):
+                                teacher_id = tid
                                 break
-                        if not conflict:
-                            available_teachers.append(tid)
-                    if not available_teachers:
-                        continue
-                    chosen_teacher = random.choice(available_teachers)
-                    # Assign
-                    timetable[grade][section][day][period] = (chosen_teacher, sub)
-                    subject_day_count[day][sub] = subject_day_count[day].get(sub, 0) + 1
-                    teacher_daily_load[(chosen_teacher, day)] = teacher_daily_load.get((chosen_teacher, day), 0) + 1
-                    placed = True
 
-                if not placed:
-                    # Could not place this subject period, fallback to games later
-                    pass
+                    # If no teacher is available, substitution
+                    if teacher_id is None:
+                        # Try games teacher
+                        if (grade, "Games") in teacher_map:
+                            tid, _ = random.choice(teacher_map[(grade, "Games")])
+                            if not is_teacher_busy(tid, day, period):
+                                teacher_id = tid
+                                subj_display = "Games"
+                            else:
+                                teacher_id = None
+                        else:
+                            subj_display = "Library"
+                            tid = None
+                            teacher_id = None
+                    else:
+                        subj_display = subj_name
 
-            # Ensure at least one Games period for each teacher & grade/week
-            # Assign to free slots and free teachers
-            for day in section_active_days:
-                for period in range(1, periods_per_day+1):
-                    if period not in timetable[grade][section][day]:
-                        # Try to assign games teacher for this grade
-                        assigned_games = False
-                        possible_games_teachers = grade_subject_teachers.get((grade, "Games"), [])
-                        random.shuffle(possible_games_teachers)
-                        for t_id in possible_games_teachers:
-                            if teacher_daily_load.get((t_id, day), 0) < 5:
-                                conflict = False
-                                for g in timetable:
-                                    for sec in timetable[g]:
-                                        if day in timetable[g][sec] and period in timetable[g][sec][day]:
-                                            if timetable[g][sec][day][period][0] == t_id:
-                                                conflict = True
-                                                break
-                                    if conflict:
-                                        break
-                                if not conflict:
-                                    timetable[grade][section][day][period] = (t_id, "Games")
-                                    teacher_daily_load[(t_id, day)] = teacher_daily_load.get((t_id, day), 0) + 1
-                                    teacher_games_assigned.add((t_id, day))
-                                    grade_games_assigned.setdefault(grade, set()).add(day)
-                                    assigned_games = True
-                                    break
-                        if not assigned_games:
-                            # Last resort assign dummy games teacher (id -1)
-                            timetable[grade][section][day][period] = (-1, "Games")
+                    if teacher_id is not None or subj_display == "Library":
+                        assign_period(teacher_id if teacher_id else -1, grade, section, day, period)
+                        assigned_periods += 1
+                        periods_today += 1
 
-    # Save timetable to DB
-    for grade in timetable:
-        for section in timetable[grade]:
-            for day in timetable[grade][section]:
-                for period in timetable[grade][section][day]:
-                    t_id, sub = timetable[grade][section][day][period]
-                    cur.execute("""
-                    INSERT INTO teacher_busy_periods (teacher_id, grade, section, period_number, day_of_week)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, (t_id, grade, section, period, day))
-    conn.commit()
     conn.close()
 
-    return timetable
+# ==============================
+# AI HELPERS
+# ==============================
 
-# ---------------- AI GENERATION -----------------------
+def suggest_changes_with_ai(timetable_df):
+    """Use Gemini AI to suggest timetable improvements."""
+    csv_data = timetable_df.to_csv(index=False)
+    prompt = f"""You are an expert school timetable planner.
+    Here is the current timetable in CSV:
+    {csv_data}
 
-def ai_generate_timetable_prompt(grade, subjects, sections, absent_teachers):
-    prompt = f"Create a weekly timetable for grade {grade} with sections {', '.join(sections)}.\n"
-    prompt += "Subjects and periods per week:\n"
-    for sub, periods, secs, days in subjects:
-        prompt += f"- {sub}: {periods} periods/week, sections: {secs}, active days: {days}\n"
-    prompt += f"Absent teachers per day: {absent_teachers}\n"
-    prompt += "Constraints:\n"
-    prompt += "- No teacher teaches two classes at the same time.\n"
-    prompt += "- Maximum two periods per subject per day per section (except if section attends less than 5 days).\n"
-    prompt += "- Substitute absent teachers if possible, else assign 'Games'.\n"
-    prompt += "- Each grade and each teacher should have at least one Games period per week.\n"
-    prompt += "Output the timetable as a JSON object keyed by section, day, period with teacher and subject.\n"
-    return prompt
+    Suggest improvements considering:
+    - No teacher teaches two places at once
+    - Students have balanced subjects
+    - Games at least once a week for all
+    - Max 2 periods per subject per day unless less than 5 days attendance
+    """
 
-def generate_timetable_ai(grade, absent_teachers, subjects, sections):
-    prompt = ai_generate_timetable_prompt(grade, subjects, sections, absent_teachers)
-    try:
-        response = genai.chat.create(
-            model="models/chat-bison-001",
-            messages=[
-                {"author": "user", "content": prompt}
-            ]
-        )
-        text = response.text
-        # Try to parse JSON from response
-        import json
-        timetable_json = json.loads(text)
-        return timetable_json
-    except Exception as e:
-        st.error(f"AI generation failed: {e}")
-        return None
+    return generate_timetable_ai(prompt)
 
-# ------------------ STREAMLIT APP ---------------------
+# ==============================
+# DISPLAY HELPERS
+# ==============================
 
-def main():
-    st.set_page_config(page_title="School Timetable Generator", layout="wide")
-    init_db()
+def display_timetable(grade, section):
+    conn = get_conn()
+    query = """
+    SELECT tbp.day_of_week, tbp.period_number, t.subject, t.teacher_name
+    FROM teacher_busy_periods tbp
+    LEFT JOIN teachers t ON tbp.teacher_id = t.id
+    WHERE tbp.grade=? AND tbp.section=?
+    ORDER BY tbp.day_of_week, tbp.period_number
+    """
+    df = pd.read_sql_query(query, conn, params=(grade, section))
+    conn.close()
 
-    # Dark/light mode toggle
-    theme = st.sidebar.selectbox("Theme", ["Light", "Dark"], index=1)
-    if theme == "Dark":
-        st.markdown(
-            """
-            <style>
-            .reportview-container {
-                background-color: #222222;
-                color: #eee;
-            }
-            </style>
-            """, unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            """
-            <style>
-            .reportview-container {
-                background-color: #ffffff;
-                color: #000000;
-            }
-            </style>
-            """, unsafe_allow_html=True
-        )
+    if df.empty:
+        st.warning("No timetable found for this grade/section.")
+        return
 
-    tabs = st.tabs(["Setup", "Absentees", "Generate Timetable", "View / Edit Timetable"])
+    # Pivot for display
+    timetable_pivot = df.pivot(index="period_number", columns="day_of_week", values="subject").fillna("")
+    st.dataframe(timetable_pivot)
 
-    # ----- Setup tab -----
-    with tabs[0]:
-        st.header("Teachers Management")
-        teacher_file = st.file_uploader("Upload Teachers CSV (teacher_name,subject,grades)", type=["csv"], key="teacher_csv")
+    if st.checkbox("Suggest AI Improvements"):
+        suggestion = suggest_changes_with_ai(df)
+        if suggestion:
+            st.markdown("### AI Suggestions")
+            st.write(suggestion)
+# ==============================
+# STREAMLIT UI
+# ==============================
+st.set_page_config(page_title="School Timetable Generator", layout="wide")
+
+st.title("📅 School Timetable Generator")
+
+init_db()
+
+menu = st.sidebar.radio("Menu", [
+    "Upload Data", "Generate Timetable", "View Timetable", "Manual Edit"
+])
+
+# ------------------------------
+# UPLOAD DATA (CSV + Manual)
+# ------------------------------
+if menu == "Upload Data":
+    st.header("Upload or Enter Teacher & Subject Data")
+
+    tab1, tab2 = st.tabs(["📄 CSV Upload", "✍ Manual Entry"])
+
+    with tab1:
+        teacher_file = st.file_uploader("Upload Teachers CSV", type=["csv"], key="teacher_csv")
         if teacher_file:
-            df = pd.read_csv(teacher_file)
+            df_t = pd.read_csv(teacher_file)
             conn = get_conn()
-            cur = conn.cursor()
-            for _, row in df.iterrows():
-                cur.execute("INSERT INTO teachers (teacher_name, subject, grades) VALUES (?, ?, ?)",
-                            (row["teacher_name"], row["subject"], row["grades"]))
-            conn.commit()
+            df_t.to_sql("teachers", conn, if_exists="append", index=False)
             conn.close()
-            st.success("Teachers uploaded from CSV!")
+            st.success("✅ Teachers uploaded.")
 
-        st.markdown("**Add Teacher Manually**")
-        with st.form("manual_teacher_form"):
+        subject_file = st.file_uploader("Upload Subjects CSV", type=["csv"], key="subject_csv")
+        if subject_file:
+            df_s = pd.read_csv(subject_file)
+            conn = get_conn()
+            df_s.to_sql("subjects", conn, if_exists="append", index=False)
+            conn.close()
+            st.success("✅ Subjects uploaded.")
+
+    with tab2:
+        with st.form("teacher_form"):
             t_name = st.text_input("Teacher Name")
             t_subject = st.text_input("Subject")
-            t_grades = st.text_input("Grades (comma separated, e.g. 10,11)")
+            t_grades = st.text_input("Grades (comma separated)")
             submitted = st.form_submit_button("Add Teacher")
             if submitted:
-                if not (t_name and t_subject and t_grades):
-                    st.warning("Fill all fields")
-                else:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO teachers (teacher_name, subject, grades) VALUES (?, ?, ?)",
-                                (t_name.strip(), t_subject.strip(), t_grades.strip()))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Teacher {t_name} added!")
+                add_teacher(t_name, t_subject, t_grades)
+                st.success("Teacher added.")
 
-        st.header("Subjects Management")
-        subject_file = st.file_uploader("Upload Subjects CSV (subject_name,grade,periods_per_week,sections,active_days)", type=["csv"], key="subject_csv")
-        if subject_file:
-            df = pd.read_csv(subject_file)
-            conn = get_conn()
-            cur = conn.cursor()
-            for _, row in df.iterrows():
-                cur.execute("""INSERT INTO subjects (subject_name, grade, periods_per_week, sections, active_days)
-                            VALUES (?, ?, ?, ?, ?)""",
-                            (row["subject_name"], row["grade"], int(row["periods_per_week"]), row.get("sections", "A"), row.get("active_days", "Monday,Tuesday,Wednesday,Thursday,Friday")))
-            conn.commit()
-            conn.close()
-            st.success("Subjects uploaded from CSV!")
-
-        st.markdown("**Add Subject Manually**")
-        with st.form("manual_subject_form"):
+        with st.form("subject_form"):
             s_name = st.text_input("Subject Name")
             s_grade = st.text_input("Grade")
-            s_periods = st.number_input("Periods Per Week", min_value=1, max_value=50, step=1)
-            s_sections = st.text_input("Sections (comma separated, default A)", value="A")
-            s_active_days = st.multiselect("Active Days for Section", WEEKDAYS, default=WEEKDAYS)
-            s_active_days_str = ",".join(s_active_days)
-            submitted_subj = st.form_submit_button("Add Subject")
-            if submitted_subj:
-                if not (s_name and s_grade and s_periods):
-                    st.warning("Fill all mandatory fields")
-                else:
-                    conn = get_conn()
-                    cur = conn.cursor()
-                    cur.execute("""INSERT INTO subjects (subject_name, grade, periods_per_week, sections, active_days)
-                                VALUES (?, ?, ?, ?, ?)""",
-                                (s_name.strip(), s_grade.strip(), s_periods, s_sections.strip(), s_active_days_str))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Subject {s_name} added!")
+            s_ppw = st.number_input("Periods per Week", min_value=1, value=5)
+            s_sections = st.text_input("Sections (comma separated)", value="A")
+            submitted_s = st.form_submit_button("Add Subject")
+            if submitted_s:
+                add_subject(s_name, s_grade, s_ppw, s_sections)
+                st.success("Subject added.")
 
-        # Number of periods in a day
-        st.header("Settings")
-        periods_per_day = st.number_input("Number of periods per day", min_value=4, max_value=12, value=8)
+# ------------------------------
+# GENERATE TIMETABLE
+# ------------------------------
+elif menu == "Generate Timetable":
+    st.header("Generate Timetable")
+    periods = st.number_input("Number of periods per day", min_value=1, value=7)
+    if st.button("Generate Now"):
+        generate_timetable(periods_per_day=periods)
+        st.success("✅ Timetable generated successfully.")
 
-        # Save settings
-        if st.button("Save Settings"):
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("periods_per_day", str(periods_per_day)))
-            conn.commit()
-            conn.close()
-            st.success("Settings saved!")
+# ------------------------------
+# VIEW TIMETABLE
+# ------------------------------
+elif menu == "View Timetable":
+    st.header("View Timetable")
+    grades = get_all_grades()
+    grade = st.selectbox("Select Grade", grades, key="view_grade")
+    sections = get_sections_for_grade(grade)
+    section = st.selectbox("Select Section", sections, key="view_section")
 
-    # ----- Absentees tab -----
-    with tabs[1]:
-        st.header("Mark Absent Teachers Per Day")
-        absent_teachers = {}
+    if st.button("Show Timetable"):
+        display_timetable(grade, section)
+
+        # Download option
         conn = get_conn()
-        cur = conn.cursor()
-        teachers = get_teachers()
-        teachers_dict = {tid: tname for tid, tname, _, _ in teachers}
-        for day in WEEKDAYS:
-            with st.expander(f"{day}"):
-                selected = st.multiselect(f"Select absent teachers on {day}", [tname for _, tname in teachers], key=f"absent_{day}")
-                absent_ids = [tid for tid, tname, _, _ in teachers if tname in selected]
-                absent_teachers[day] = absent_ids
+        df = pd.read_sql_query(
+            "SELECT * FROM teacher_busy_periods WHERE grade=? AND section=?",
+            conn, params=(grade, section)
+        )
+        conn.close()
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("⬇ Download CSV", csv, file_name=f"{grade}_{section}_timetable.csv")
 
-    # ----- Generate Timetable tab -----
-    with tabs[2]:
-        st.header("Generate Timetable")
+# ------------------------------
+# MANUAL EDIT
+# ------------------------------
+elif menu == "Manual Edit":
+    st.header("Manual Timetable Editing (with Constraints)")
+    grades = get_all_grades()
+    grade = st.selectbox("Grade", grades, key="edit_grade")
+    sections = get_sections_for_grade(grade)
+    section = st.selectbox("Section", sections, key="edit_section")
 
-        # Load settings
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM settings WHERE key='periods_per_day'")
-        res = cur.fetchone()
-        if res:
-            periods_per_day = int(res[0])
-        else:
-            periods_per_day = 8
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT tbp.id, tbp.day_of_week, tbp.period_number, t.subject, t.teacher_name
+        FROM teacher_busy_periods tbp
+        LEFT JOIN teachers t ON tbp.teacher_id = t.id
+        WHERE tbp.grade=? AND tbp.section=?
+    """, conn, params=(grade, section))
+    conn.close()
 
-        st.write(f"Periods per day (from settings): {periods_per_day}")
-
-        st.write("Select AI or Manual generation:")
-        generation_mode = st.radio("Generation mode", ["AI-powered", "Manual randomized"], index=0)
-
-        if st.button("Generate Timetable for All Grades"):
-            # For demo, absent teachers from tab 2 used, pass as dictionary
-            at = absent_teachers
-            if generation_mode == "Manual randomized":
-                generate_timetable(ai_mode=False, absent_teachers=at, max_periods_per_subject_per_day=2)
-                st.success("Timetable generated manually.")
+    if not df.empty:
+        row_to_edit = st.selectbox("Select Period to Edit", df.index)
+        new_subject = st.text_input("New Subject", value=df.loc[row_to_edit, "subject"])
+        new_teacher = st.text_input("New Teacher", value=df.loc[row_to_edit, "teacher_name"])
+        if st.button("Update Period"):
+            # Check constraints before updating
+            teacher_id = get_teacher_id_by_name(new_teacher)
+            if not is_teacher_busy(teacher_id, df.loc[row_to_edit, "day_of_week"], df.loc[row_to_edit, "period_number"]):
+                update_period(df.loc[row_to_edit, "id"], teacher_id, new_subject)
+                st.success("✅ Period updated successfully.")
             else:
-                # Run AI generation per grade - demo simplified
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("SELECT DISTINCT grade FROM subjects")
-                grades = [r[0] for r in cur.fetchall()]
-                for grade in grades:
-                    subs = get_subjects_for_grade(grade)
-                    # Identify sections:
-                    secs_set = set()
-                    for _, _, secs_csv, _ in subs:
-                        for sec in secs_csv.split(","):
-                            secs_set.add(sec.strip())
-                    timetable_json = generate_timetable_ai(grade, at, subs, list(secs_set))
-                    if timetable_json:
-                        st.write(f"AI timetable for grade {grade} (preview):")
-                        st.json(timetable_json)
-                st.info("AI generation attempted for all grades (check output above).")
-
-    # ----- View/Edit Timetable tab -----
-    with tabs[3]:
-        st.header("View and Manual Edit Timetable")
-
-        conn = get_conn()
-        cur = conn.cursor()
-        # Get all grades & sections
-        cur.execute("SELECT DISTINCT grade FROM subjects")
-        grades = [r[0] for r in cur.fetchall()]
-        selected_grade = st.selectbox("Select Grade", grades, key="view_grade")
-        # Find sections for selected grade
-        cur.execute("SELECT DISTINCT sections FROM subjects WHERE grade=?", (selected_grade,))
-        sections_csv_list = cur.fetchall()
-        sections = set()
-        for (csv_str,) in sections_csv_list:
-            for sec in csv_str.split(","):
-                sections.add(sec.strip())
-        if not sections:
-            sections = {"A"}
-        selected_section = st.selectbox("Select Section", sorted(list(sections)), key="view_section")
-
-        # Load timetable for grade and section
-        cur.execute("""
-            SELECT tbp.id, t.teacher_name, t.subject, tbp.period_number, tbp.day_of_week
-            FROM teacher_busy_periods tbp
-            LEFT JOIN teachers t ON tbp.teacher_id = t.id
-            WHERE tbp.grade=? AND tbp.section=?
-            ORDER BY tbp.day_of_week, tbp.period_number
-        """, (selected_grade, selected_section))
-        rows = cur.fetchall()
-
-        # Load subjects for grade & section
-        cur.execute("SELECT subject_name FROM subjects WHERE grade=?", (selected_grade,))
-        all_subs = [r[0] for r in cur.fetchall()]
-        # Load teachers for grade
-        cur.execute("SELECT id, teacher_name, subject FROM teachers")
-        all_teachers = cur.fetchall()
-
-        # Build timetable dict day->period->(teacher,subject)
-        timetable_data = {day: {p: ("", "") for p in range(1, periods_per_day+1)} for day in WEEKDAYS}
-        id_map = {}
-        for id_, tname, sub, period, day in rows:
-            timetable_data[day][period] = (tname if tname else "Games", sub)
-            id_map[(day, period)] = id_
-
-        st.markdown("### Timetable")
-        for day in WEEKDAYS:
-            st.markdown(f"**{day}**")
-            cols = st.columns(periods_per_day)
-            for period in range(1, periods_per_day+1):
-                key_base = f"{selected_grade}_{selected_section}_{day}_{period}"
-                current_teacher, current_subject = timetable_data[day][period]
-                # Select subject
-                subj_sel = st.selectbox(f"Subject (Period {period})", options=[""] + all_subs, index=0 if current_subject=="" else ([""] + all_subs).index(current_subject), key=f"subj_{key_base}", label_visibility="collapsed")
-                # Select teacher (filtered by subject)
-                filtered_teachers = [t for t in all_teachers if t[2] == subj_sel]
-                teacher_names = [t[1] for t in filtered_teachers]
-                if current_teacher not in teacher_names:
-                    teacher_names.insert(0, current_teacher)
-                teacher_sel = st.selectbox(f"Teacher (Period {period})", options=[""] + teacher_names, index=0 if current_teacher=="" else ([""] + teacher_names).index(current_teacher), key=f"teach_{key_base}", label_visibility="collapsed")
-                # On change, update DB if valid
-                if st.button(f"Save Period {period} {day}", key=f"save_{key_base}"):
-                    if not subj_sel or not teacher_sel:
-                        st.warning("Subject and teacher must be selected")
-                    else:
-                        # Validate no teacher overlap for that day/period
-                        conflict = False
-                        for g in grades:
-                            cur.execute("""
-                            SELECT tbp.id, t.teacher_name, t.subject, tbp.grade, tbp.section, tbp.period_number, tbp.day_of_week
-                            FROM teacher_busy_periods tbp
-                            JOIN teachers t ON tbp.teacher_id = t.id
-                            WHERE tbp.day_of_week=? AND tbp.period_number=? AND t.teacher_name=? AND NOT (tbp.grade=? AND tbp.section=?)
-                            """, (day, period, teacher_sel, selected_grade, selected_section))
-                            if cur.fetchall():
-                                conflict = True
-                                break
-                        if conflict:
-                            st.error(f"Teacher {teacher_sel} already assigned at {day} period {period} in another grade/section.")
-                        else:
-                            # Insert or update record
-                            teacher_id = None
-                            for t in all_teachers:
-                                if t[1] == teacher_sel:
-                                    teacher_id = t[0]
-                                    break
-                            if not teacher_id:
-                                st.error("Teacher not found in DB")
-                            else:
-                                if (day, period) in id_map:
-                                    # update
-                                    cur.execute("""
-                                        UPDATE teacher_busy_periods SET teacher_id=? WHERE id=?
-                                    """, (teacher_id, id_map[(day, period)]))
-                                else:
-                                    cur.execute("""
-                                        INSERT INTO teacher_busy_periods (teacher_id, grade, section, period_number, day_of_week)
-                                        VALUES (?, ?, ?, ?, ?)
-                                    """, (teacher_id, selected_grade, selected_section, period, day))
-                                conn.commit()
-                                st.success(f"Period {period} on {day} updated.")
-
-    # Download CSVs
-    st.sidebar.header("Download Data CSVs")
-    if st.sidebar.button("Download Teachers CSV"):
-        conn = get_conn()
-        df = pd.read_sql_query("SELECT teacher_name, subject, grades FROM teachers", conn)
-        conn.close()
-        csv = df.to_csv(index=False)
-        st.sidebar.download_button("Download teachers.csv", data=csv, file_name="teachers.csv", mime="text/csv")
-    if st.sidebar.button("Download Subjects CSV"):
-        conn = get_conn()
-        df = pd.read_sql_query("SELECT subject_name, grade, periods_per_week, sections, active_days FROM subjects", conn)
-        conn.close()
-        csv = df.to_csv(index=False)
-        st.sidebar.download_button("Download subjects.csv", data=csv, file_name="subjects.csv", mime="text/csv")
-
-if __name__ == "__main__":
-    main()
+                st.error("❌ Constraint violated: Teacher already busy in that period.")
