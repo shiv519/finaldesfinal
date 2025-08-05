@@ -15,6 +15,18 @@ DB_PATH = "timetable.db"
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
+def get_timetable_data_as_text():
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT day_of_week, grade, section, period_number, subject
+        FROM teacher_busy_periods
+        JOIN teachers ON teacher_busy_periods.teacher_id = teachers.id
+        ORDER BY grade, section, day_of_week, period_number
+    """, conn)
+    conn.close()
+    return df.to_string(index=False)
+
+
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -239,8 +251,18 @@ def assign_games_and_library(grades_sections, periods_per_day):
 # AI INTEGRATION
 # ----------------------------
 
-def generate_ai_timetable_suggestion(grade, sections, periods_per_day, absent_teachers):
-    prompt = f"""You are a smart school timetable generator.
+import google.generativeai as genai
+
+def generate_ai_timetable_suggestion(grade, sections, periods_per_day, absent_teachers, custom_prompt=None):
+    """
+    Generate a timetable suggestion using Google Gemini AI.
+    If custom_prompt is provided, it will be included in the request.
+    """
+    genai.configure(api_key=st.secrets["gemini_api_key"])
+
+    # Default constraints
+    base_prompt = f"""
+You are a smart school timetable generator.
 Grade: {grade}
 Sections: {', '.join(sections)}
 Periods per day: {periods_per_day}
@@ -251,18 +273,27 @@ Generate a balanced timetable ensuring:
 - Max 2 periods per subject per day (except for sections attending fewer days)
 - At least one Games and one Library period per week per section
 - Substitute absent teachers with other available teachers or 'Games' if no substitute found
-Return a JSON dictionary with day -> period -> section -> (subject, teacher) assignments."""
+Return the result as a JSON dictionary in the format:
+{{
+    "Monday": {{
+        "Period 1": {{
+            "Section A": ["Math", "Mr. Smith"],
+            "Section B": ["English", "Ms. Johnson"]
+        }},
+        "Period 2": ...
+    }},
+    ...
+}}
+"""
 
-    genai.api_key = st.secrets["gemini_api_key"]
+    # If the user gave a custom request, append it
+    if custom_prompt and custom_prompt.strip():
+        base_prompt = f"{custom_prompt}\n\nHere is the timetable request:\n{base_prompt}"
 
     try:
-        response = genai.chat.completions.create(
-            model="models/chat-bison-001",
-            messages=[{"content": prompt, "author": "user"}],
-            temperature=0.7,
-            max_output_tokens=1000,
-        )
-        return response.choices[0].message.content
+        model = genai.GenerativeModel("gemini-pro")
+        response = model.generate_content(base_prompt)
+        return response.text.strip()
     except Exception as e:
         st.error(f"AI generation error: {e}")
         return None
