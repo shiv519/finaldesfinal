@@ -642,7 +642,14 @@ with tab2:
 
 with tab3:
     st.header("Generate Timetable")
-    periods_per_day = st.number_input("Periods Per Day", min_value=4, max_value=12, value=get_periods_per_day(), step=1, key="periods_per_day_input")
+    periods_per_day = st.number_input(
+        "Periods Per Day",
+        min_value=4,
+        max_value=12,
+        value=get_periods_per_day(),
+        step=1,
+        key="periods_per_day_input"
+    )
     if st.button("Save Periods Per Day"):
         set_periods_per_day(periods_per_day)
         st.success("Saved periods per day setting")
@@ -658,12 +665,28 @@ with tab3:
 
     st.markdown("---")
     st.subheader("Generate AI Suggestion for a Grade")
-    sel_grade = st.selectbox("Select Grade for AI Timetable", options=list(grades_sections.keys()))
+
+    sel_grade = st.selectbox(
+        "Select Grade for AI Timetable",
+        options=list(grades_sections.keys())
+    )
     sel_sections = grades_sections[sel_grade]["sections"]
+
+    custom_ai_prompt = st.text_area(
+        "Optional: Add custom AI instructions",
+        placeholder="E.g., Ensure Math is in the morning, avoid last period for Science..."
+    )
+
     if st.button("Generate AI Timetable Suggestion"):
-        suggestion = generate_ai_timetable_suggestion(sel_grade, sel_sections, periods_per_day, absent_teachers)
+        suggestion = generate_ai_timetable_suggestion(
+            sel_grade,
+            sel_sections,
+            periods_per_day,
+            absent_teachers,
+            custom_prompt=custom_ai_prompt
+        )
         if suggestion:
-            st.code(suggestion)
+            st.code(suggestion, language="json")
 
 # ----------------------------
 # TIMETABLE VIEW / EDIT UI
